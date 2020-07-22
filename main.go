@@ -52,6 +52,7 @@ func main() {
 	socketPath := flag.String("l", "", "agent: path of the UNIX socket to listen on")
 	resetFlag := flag.Bool("really-delete-all-piv-keys", false, "setup: reset the PIV applet")
 	setupFlag := flag.Bool("setup", false, "setup: configure a new YubiKey")
+	pinCacheFlag := flag.Int("pin-cache", 0, "agent: if none zero, cache PIN for specified time in seconds")
 	flag.Parse()
 
 	if flag.NArg() > 0 {
@@ -71,11 +72,11 @@ func main() {
 			flag.Usage()
 			os.Exit(1)
 		}
-		runAgent(*socketPath)
+		runAgent(*socketPath, *pinCacheFlag)
 	}
 }
 
-func runAgent(socketPath string) {
+func runAgent(socketPath string, pinCache int) {
 	if _, err := exec.LookPath(pinentry.GetBinary()); err != nil {
 		log.Fatalf("PIN entry program %q not found!", pinentry.GetBinary())
 	}
@@ -87,6 +88,11 @@ func runAgent(socketPath string) {
 	}
 
 	a := &Agent{}
+
+	if pinCache > 0 {
+		// start background thread to expire PIN
+		a.expirePIN(pinCache)
+	}
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGHUP)
@@ -123,9 +129,12 @@ func runAgent(socketPath string) {
 }
 
 type Agent struct {
-	mu     sync.Mutex
-	yk     *piv.YubiKey
-	serial uint32
+	mu        sync.Mutex
+	yk        *piv.YubiKey
+	serial    uint32
+	pin       string
+	pin_used  time.Time
+	pin_cache int
 
 	// touchNotification is armed by Sign to show a notification if waiting for
 	// more than a few seconds for the touch operation. It is paused and reset
@@ -145,6 +154,7 @@ func healthy(yk *piv.YubiKey) bool {
 	// We can't use Serial because it locks the session on older firmwares, and
 	// can't use Retries because it fails when the session is unlocked.
 	_, err := yk.AttestationCertificate()
+	log.Println("AttestationCertificate:", err)
 	return err == nil
 }
 
@@ -196,7 +206,31 @@ func (a *Agent) Close() error {
 	return nil
 }
 
+func (a *Agent) expirePIN(pinCacheTime int) {
+	a.pin_cache = pinCacheTime // allow caching
+	a.pin_used = time.Now()
+	go func() {
+		log.Println("expiring PIN after", pinCacheTime, "seconds")
+		for true {
+			time.Sleep(5 * time.Second)
+			if a.pin != "" {
+				age := time.Now().Sub(a.pin_used)
+				if age > time.Duration(a.pin_cache)*time.Second {
+					log.Println("expire PIN")
+					a.pin = ""
+				}
+
+			}
+		}
+	}()
+}
+
 func (a *Agent) getPIN() (string, error) {
+	if a.pin != "" {
+		log.Println("using cached PIN")
+		a.pin_used = time.Now()
+		return a.pin, nil
+	}
 	if a.touchNotification != nil && a.touchNotification.Stop() {
 		defer a.touchNotification.Reset(5 * time.Second)
 	}
@@ -213,6 +247,11 @@ func (a *Agent) getPIN() (string, error) {
 	p.Set("desc", fmt.Sprintf("YubiKey serial number: %d"+retries, a.serial))
 	p.Set("prompt", "Please enter your PIN:")
 	pin, err := p.GetPin()
+	if err == nil && a.pin_cache > 0 {
+		log.Println("caching pin")
+		a.pin = string(pin)
+		a.pin_used = time.Now()
+	}
 	return string(pin), err
 }
 
@@ -353,11 +392,22 @@ func (a *Agent) Remove(key ssh.PublicKey) error {
 	return ErrOperationUnsupported
 }
 func (a *Agent) RemoveAll() error {
-	return ErrOperationUnsupported
+	a.pin = ""
+	return nil
 }
 func (a *Agent) Lock(passphrase []byte) error {
-	return ErrOperationUnsupported
+	a.pin = ""
+	log.Println("got lock command, clear PIN")
+	return nil
 }
 func (a *Agent) Unlock(passphrase []byte) error {
-	return ErrOperationUnsupported
+	if a.pin_cache > 0 {
+		a.pin = string(passphrase)
+		a.pin_used = time.Now()
+		log.Println("got unlock command, set PIN")
+	} else {
+		// refuse to cache if we are not expiring
+		return ErrOperationUnsupported
+	}
+	return nil
 }
