@@ -50,7 +50,15 @@ Packaging contributions are very welcome.
 
 ### Windows
 
-Windows support is currently WIP.
+Windows support is currently WIP.  In Windows, a named pipe is used rather than
+a `AF_UNIX` socket.  E.g.:
+
+	set SSH_AUTH_SOCK \\.\pipe\yubikey-agent
+	yubikey-agent.exe -l %SSH_AUTH_SOCK%
+
+To get the `pinentry` program, an option is to install the simple binary
+release for GnuPG (e.g.
+[`gnupg-w32-<version>.exe`](https://gnupg.org/download/)).
 
 ## Advanced topics
 

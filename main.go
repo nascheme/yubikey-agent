@@ -21,7 +21,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -102,13 +101,9 @@ func runAgent(socketPath string, pinCache int) {
 		}
 	}()
 
-	os.Remove(socketPath)
-	if err := os.MkdirAll(filepath.Dir(socketPath), 0777); err != nil {
-		log.Fatalln("Failed to create UNIX socket folder:", err)
-	}
-	l, err := net.Listen("unix", socketPath)
+	l, err := CreateAuthSock(socketPath)
 	if err != nil {
-		log.Fatalln("Failed to listen on UNIX socket:", err)
+		log.Fatalln("Failed to listen on socket:", err)
 	}
 
 	for {
@@ -247,9 +242,12 @@ func (a *Agent) getPIN() (string, error) {
 	p.Set("desc", fmt.Sprintf("YubiKey serial number: %d"+retries, a.serial))
 	p.Set("prompt", "Please enter your PIN:")
 	pin, err := p.GetPin()
-	if err == nil && a.pin_cache > 0 {
-		log.Println("caching pin")
+	if err != nil {
+		return "", err
+	}
+	if a.pin_cache > 0 {
 		a.pin = string(pin)
+		log.Println("caching pin")
 		a.pin_used = time.Now()
 	}
 	return string(pin), err
